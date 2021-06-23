@@ -1,0 +1,214 @@
+#!/usr/bin/env perl
+
+###############################################################
+# mdf (MS SQL Server database) file analisys                  #
+# (C) 2021, ledorub.org                                       #
+###############################################################
+
+use strict;
+use Term::ANSIColor qw(:constants);
+
+#######
+
+my %TYPES = (
+	0 => 'Clear Page',
+	1 => 'Data',
+	2 => 'Index',
+	3 => 'TextMix',
+	4 => 'TextTree',
+	7 => 'Sort',
+	8 => 'GAM',
+	9 => 'SGAM',
+	10 =>'IAM',
+	11 => 'PFS',
+	13 => 'Boot',
+	15 => 'FileHeader',
+	16 => 'DiffMap',
+	17 => 'MLMap',
+);
+
+open (F, $ARGV[0]);
+binmode F;
+
+my $buf;
+my $buflen = 8192;
+my $cnt;
+my $notvalid;
+my $valid;
+my $prevstate;
+my $prevbuf;
+my %prevh;
+my $normcnt;
+my @hexbuf;
+my %types;
+my $DEBUG = 0;
+my $continousvalidcnt;
+my $continousnotvalidcnt;
+
+while (read(F, $buf, $buflen)) {
+	my $local_not_valid = 0;
+	$cnt++;
+	if ($cnt % 150 == 0) {
+		print "\n";
+	}
+
+
+	my %h = get_page_header($buf);
+	unless ($h{headerVersion} == 1 || $h{headerVersion} == 0) {
+		$local_not_valid++; 
+		print "header Version: '$h{headerVersion}'\n" if $DEBUG;	
+	}
+	if (! $TYPES{$h{type}}) {
+		print "Type problem: $h{type}\n" if $DEBUG;
+		$local_not_valid++;
+	} else {
+		$types{$h{type}}++;
+	}
+	#$local_not_valid++ if ($h{pMinLen} == 0);
+#	my @slotArray = get_page_slot_array($buf, $h{slotCnt});
+#	$local_not_valid++ if (($slotArray[0] < 96 || $slotArray[0] > 8192) && $slotArray[0] != 0);
+	if ($DEBUG && $local_not_valid) {
+#		for (@slotArray) { print "$_ "; }
+	}
+
+	if ($DEBUG && $local_not_valid) {
+		print "counter:      $cnt\n";
+		print "header ver:   $h{headerVersion}\n";
+		print "Page ID:      ($h{fileID}:$h{pageID})\n";
+		print "Type:         $h{type}\n";
+		print "Next page ID: ($h{nextFileID}:$h{nextPageID})\n";
+		print "Prev page ID: ($h{prevFileID}:$h{prevPageID})\n";
+		for (keys %h) {
+			print "$_: $h{$_}\n";
+		}
+		print "\n";
+	}
+
+
+	$normcnt++;
+	if ($local_not_valid) {
+		print RED ".";
+		if ($prevstate eq 'V') {
+#			print "\nВалидных страниц: $continousvalidcnt\n";
+		}
+		$continousvalidcnt = 0;
+		$continousnotvalidcnt ++;
+		$notvalid++;
+		$prevstate = 'NV';
+	} else {
+		print GREEN ".";
+		if ($prevstate eq 'NV') {
+#			print "\nНевалидных страниц: $continousnotvalidcnt\n";
+		}
+		$continousvalidcnt++;
+		$continousnotvalidcnt = 0;
+		$valid++;
+		$prevstate = 'V';
+	}
+
+	$prevbuf = $buf;
+}
+
+
+print "\n";
+print "Not valid pages: $notvalid\n";
+print "Valid pages: $valid\n";
+print "Types:\n";
+for (sort keys %types) {
+	print "$TYPES{$_} ($_)\t$types{$_}\n";
+}
+
+
+
+sub charstat($) {
+	my @st;
+	for (0..255) {
+		$st[$_] = 0;
+	}
+	my $b = shift;
+	my (@k) = split(//, $b);
+	for (@k) {
+		$st[ord($_)]++;
+	}
+	return join(",", @st);
+}
+
+
+
+sub get_page_header($) {
+	$buf = shift;
+	my %h;
+	($h{headerVersion}, 
+	 $h{type}, 
+	 $h{typeFlagsBits}, 
+	 $h{level}, 
+	 $h{flagBits}, 
+	 $h{indexId}, 
+	 $h{prevPageID}, 
+	 $h{prevFileID}, 
+	 $h{pMinLen}, 
+	 $h{nextPageID}, 
+	 $h{nextFileID},
+	 $h{slotCnt},
+	 $h{objectID},
+	 $h{freeCnt},
+	 $h{freeData},
+	 $h{pageID},
+	 $h{fileID},
+	 $h{reservedCnt},
+	 $h{lsn1},
+	 $h{lsn2},
+	 $h{lsn3},
+    ) = unpack("C4S2IS2IS2IS2IS2I2S2IS2", $buf);
+	return %h;
+}
+
+
+sub get_page_body($) {
+	my @body = unpack('C*', shift);
+	return pack('C*', $body[96..$#body]);
+}
+
+sub get_page_slot_array($$) {
+		my $buf = shift;
+		my $slotCnt = shift;
+		my @slotArray;
+	    my ($hex) = unpack("H*", $buf);
+	    my @full = unpack("(A2)*", $hex);;
+
+	    for (my $i = 0; $i < $slotCnt * 2; $i += 2) {
+	    	my $firstbyte = $full[$#full - $i ];
+	    	my $secondbyte = $full[$#full - $i - 1];
+	    	my $resbyte = hex("$firstbyte$secondbyte ");
+	    	push(@slotArray, $resbyte);
+	    }
+	    return @slotArray;
+}
+
+sub get_record($$$) {
+	my $buf = shift;
+	my $offset = shift;
+	my $pminlen = shift;
+
+	my $tpl = "C" . $offset;
+	$tpl .= "CCI";
+	$pminlen = $pminlen - 4;
+	$tpl .= "C$pminlen";
+	print "$tpl";
+
+	my ($status_bits, undef, $offset1, $datafixed) = unpack($tpl, $buf);
+
+	print "\n$status_bits, $offset1, $datafixed\n";
+
+
+}
+
+sub parse_page_body($) {
+	my $body = shift;
+	my $pMinLen = shift;
+}
+
+
+sub boot_page($) {
+
+}
